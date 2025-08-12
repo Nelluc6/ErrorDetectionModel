@@ -42,7 +42,7 @@ def build_submission_index(problem_id: str) -> Dict[str, Tuple[str, str, Dict[st
     Read metadata/<problem_id>.csv and build a dict:
       submission_id -> (language, filename, full_row_dict)
     """
-    meta_csv = CODENET_ROOT / "metadata" / f"{problem_id}.csv"
+    meta_csv = CODENET_ROOT / "Project_CodeNet" / "metadata" / f"{problem_id}.csv"
     if not meta_csv.exists():
         raise FileNotFoundError(f"Missing metadata csv: {meta_csv}")
 
@@ -71,7 +71,7 @@ def build_submission_index(problem_id: str) -> Dict[str, Tuple[str, str, Dict[st
 def resolve_source_path(problem_id: str, submission_id: str, language: str, filename: str) -> Path:
     # Canonical CodeNet structure: data/<problem_id>/<language>/<filename>
     # submission_id is nopt used here, but needed earlier in build_submission_index so it has to be a part of problem_id
-    return CODENET_ROOT / "data" / problem_id / language / filename
+    return CODENET_ROOT / "Project_CodeNet" / "data" / problem_id / language / filename
 
 def map_status_to_label(status: str) -> str:
     """
@@ -180,7 +180,7 @@ if __name__ == "__main__":
     # Basic sanity checks before running
     if not CODENET_ROOT.exists():
         raise SystemExit(f"CODENET_PATH does not exist: {CODENET_ROOT}")
-    if not (CODENET_ROOT / "data").exists() or not (CODENET_ROOT / "metadata").exists():
+    if not (CODENET_ROOT / "Project_CodeNet" / "data").exists() or not (CODENET_ROOT / "Project_CodeNet" / "metadata").exists():
         raise SystemExit(f"Expected 'data/' and 'metadata/' under CODENET_PATH, but they were not found at: {CODENET_ROOT}")
     if not SPLIT_DIR.exists():
         raise SystemExit(f"SPLIT_DIR not found: {SPLIT_DIR}")
