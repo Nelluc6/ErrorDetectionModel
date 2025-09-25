@@ -1,0 +1,19 @@
+# Core dependencies
+numpy>=1.21.0
+
+# Optional ML dependencies
+scikit-learn>=1.0.0
+torch>=1.9.0  # For neural network models
+
+# Optional web scraping (for JavaScript analysis)
+esprima>=4.0.1
+
+# Optional static analysis
+pylint>=2.12.0
+
+# Optional visualization
+matplotlib>=3.5.0
+seaborn>=0.11.0
+
+# Development and testing
+pytest>=6.0.0
