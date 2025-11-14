@@ -1,0 +1,99 @@
+version: '3.8'
+
+services:
+  error-detection:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: error-detection-model:latest
+    container_name: error-detection
+
+    # Mount volumes for analysis
+    volumes:
+      # Mount code to analyze (read-only to prevent accidental changes)
+      - ./code_to_analyze:/code:ro
+
+      # Mount output directory for reports
+      - ./reports:/app/reports
+
+      # Mount models directory for custom trained models
+      - ./models:/app/models
+
+      # Optional: Mount CodeNet data for training
+      # - /path/to/Project_CodeNet:/data/Project_CodeNet:ro
+
+    # Set working directory
+    working_dir: /app
+
+    # Environment variables
+    environment:
+      - CODENET_PATH=/data/Project_CodeNet
+      - PYTHONUNBUFFERED=1
+
+    # Default command - analyze code in /code directory
+    # Override with: docker-compose run error-detection python cli.py [options]
+    command: python cli.py --help
+
+    # Keep container running for interactive use (optional)
+    # stdin_open: true
+    # tty: true
+
+  # Optional: Training service for CodeNet model training
+  training:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: error-detection-model:latest
+    container_name: error-detection-training
+
+    volumes:
+      - ./models:/app/models
+      - ./data:/data
+      # Mount CodeNet dataset for training
+      # - /path/to/Project_CodeNet:/data/Project_CodeNet:ro
+
+    environment:
+      - CODENET_PATH=/data/Project_CodeNet
+      - PYTHONUNBUFFERED=1
+
+    # Training command example
+    command: >
+      python codenet_model_trainer.py
+      --output /app/models/runtime_error_model.pkl
+      --model-type random_forest
+      --max-problems 100
+      --languages Python
+
+    # Training can be resource-intensive
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+
+    profiles:
+      - training  # Only start with: docker-compose --profile training up
+
+  # Optional: GUI service (if you want to expose the GUI)
+  gui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: error-detection-model:latest
+    container_name: error-detection-gui
+
+    volumes:
+      - ./code_to_analyze:/code:ro
+      - ./reports:/app/reports
+      - ./models:/app/models
+
+    ports:
+      - "8080:8080"
+
+    environment:
+      - PYTHONUNBUFFERED=1
+
+    command: python run_gui.py
+
+    profiles:
+      - gui  # Only start with: docker-compose --profile gui up

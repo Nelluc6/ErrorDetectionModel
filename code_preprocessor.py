@@ -136,8 +136,13 @@ class CodePreprocessor:
             # Parse the AST
             tree = ast.parse(code)
 
-            # Check for common issues
+            # Track defined variables and imports in each scope
+            defined_vars = set()
+            imported_modules = set()
+
+            # Analyze the AST
             for node in ast.walk(tree):
+                # Check for bare except clauses
                 if isinstance(node, ast.ExceptHandler) and node.type is None:
                     issues.append({
                         'type': 'logic_error',
@@ -146,15 +151,18 @@ class CodePreprocessor:
                         'suggestions': ['Specify specific exception types to catch']
                     })
 
+                # Check for dangerous functions
                 elif isinstance(node, ast.Call):
-                    if isinstance(node.func, ast.Name) and node.func.id == 'eval':
-                        issues.append({
-                            'type': 'runtime_error',
-                            'line': node.lineno,
-                            'message': 'Use of eval() is dangerous',
-                            'suggestions': ['Consider safer alternatives to eval()']
-                        })
+                    if isinstance(node.func, ast.Name):
+                        if node.func.id == 'eval':
+                            issues.append({
+                                'type': 'runtime_error',
+                                'line': node.lineno,
+                                'message': 'Use of eval() is dangerous',
+                                'suggestions': ['Consider safer alternatives to eval()']
+                            })
 
+                # Check for relative imports
                 elif isinstance(node, ast.ImportFrom) and node.module is None:
                     issues.append({
                         'type': 'logic_error',
@@ -163,6 +171,72 @@ class CodePreprocessor:
                         'suggestions': ['Use absolute imports or ensure proper package structure']
                     })
 
+                # Track imports
+                elif isinstance(node, ast.Import):
+                    for alias in node.names:
+                        imported_modules.add(alias.name.split('.')[0])
+
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module:
+                        imported_modules.add(node.module.split('.')[0])
+
+                # Track variable assignments
+                elif isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            defined_vars.add(target.id)
+
+                elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                    defined_vars.add(node.target.id)
+
+                # Check for division by zero (literal zeros only)
+                elif isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Div, ast.FloorDiv, ast.Mod)):
+                    if isinstance(node.right, ast.Constant) and node.right.value == 0:
+                        issues.append({
+                            'type': 'runtime_error',
+                            'line': node.lineno,
+                            'message': 'Division by zero detected',
+                            'suggestions': ['Check divisor is not zero before division']
+                        })
+
+                # Check for potential type errors in string concatenation
+                elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+                    # Check if mixing strings with non-strings
+                    if isinstance(node.left, ast.Constant) and isinstance(node.left.value, str):
+                        if isinstance(node.right, ast.Constant) and not isinstance(node.right.value, str):
+                            issues.append({
+                                'type': 'type_error',
+                                'line': node.lineno,
+                                'message': 'Cannot concatenate string with non-string type',
+                                'suggestions': ['Convert non-string values to strings using str()']
+                            })
+
+                # Check for accessing None attributes
+                elif isinstance(node, ast.Attribute):
+                    if isinstance(node.value, ast.Constant) and node.value.value is None:
+                        issues.append({
+                            'type': 'runtime_error',
+                            'line': node.lineno,
+                            'message': f"AttributeError: 'NoneType' object has no attribute '{node.attr}'",
+                            'suggestions': ['Check for None before accessing attributes']
+                        })
+
+                # Check for index out of bounds on literal lists
+                elif isinstance(node, ast.Subscript):
+                    if isinstance(node.value, (ast.List, ast.Tuple)):
+                        if isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, int):
+                            list_len = len(node.value.elts) if isinstance(node.value, ast.List) else len(node.value.elts)
+                            if node.slice.value >= list_len or node.slice.value < -list_len:
+                                issues.append({
+                                    'type': 'runtime_error',
+                                    'line': node.lineno,
+                                    'message': f'IndexError: list index out of range (index {node.slice.value}, length {list_len})',
+                                    'suggestions': ['Check index is within valid range']
+                                })
+
+            # Additional deeper analysis with actual execution context
+            issues.extend(self._deep_python_analysis(code))
+
         except SyntaxError as e:
             issues.append({
                 'type': 'syntax_error',
@@ -170,12 +244,408 @@ class CodePreprocessor:
                 'message': f'Python syntax error: {e.msg}',
                 'suggestions': ['Fix the syntax error before proceeding']
             })
+        except Exception as e:
+            self.logger.debug(f"Error during Python AST analysis: {e}")
 
         # Use pylint if available
         if PYLINT_AVAILABLE:
             issues.extend(self._run_pylint(code))
 
         return issues
+
+    def _deep_python_analysis(self, code: str) -> List[Dict[str, Any]]:
+        """Deeper Python analysis with execution simulation"""
+        issues = []
+
+        try:
+            # Compile the code to check for additional errors
+            compile(code, '<string>', 'exec')
+        except SyntaxError as e:
+            issues.append({
+                'type': 'syntax_error',
+                'line': e.lineno or 1,
+                'message': f'Syntax error: {e.msg}',
+                'suggestions': ['Fix the syntax error']
+            })
+        except IndentationError as e:
+            issues.append({
+                'type': 'syntax_error',
+                'line': e.lineno or 1,
+                'message': f'Indentation error: {e.msg}',
+                'suggestions': ['Fix the indentation']
+            })
+        except TabError as e:
+            issues.append({
+                'type': 'syntax_error',
+                'line': e.lineno or 1,
+                'message': 'Inconsistent use of tabs and spaces',
+                'suggestions': ['Use either tabs or spaces, not both']
+            })
+
+        # Try parsing and analyzing with AST
+        try:
+            tree = ast.parse(code)
+
+            # Check for undefined variables by looking at Name nodes
+            class NameChecker(ast.NodeVisitor):
+                def __init__(self):
+                    self.defined = set(['__name__', '__file__', '__doc__',
+                                       'True', 'False', 'None', 'print', 'len',
+                                       'range', 'str', 'int', 'float', 'list',
+                                       'dict', 'set', 'tuple', 'type', 'object'])
+                    self.issues = []
+                    self.imported = set()
+
+                def visit_Import(self, node):
+                    for alias in node.names:
+                        name = alias.asname if alias.asname else alias.name
+                        self.defined.add(name.split('.')[0])
+                        self.imported.add(alias.name)
+                    self.generic_visit(node)
+
+                def visit_ImportFrom(self, node):
+                    if node.module:
+                        self.imported.add(node.module)
+                    for alias in node.names:
+                        name = alias.asname if alias.asname else alias.name
+                        self.defined.add(name)
+                    self.generic_visit(node)
+
+                def visit_FunctionDef(self, node):
+                    self.defined.add(node.name)
+                    # Save current scope
+                    old_defined = self.defined.copy()
+
+                    # Create function scope with builtins and parameters
+                    func_scope = set(['__name__', '__file__', '__doc__',
+                                     'True', 'False', 'None', 'print', 'len',
+                                     'range', 'str', 'int', 'float', 'list',
+                                     'dict', 'set', 'tuple', 'type', 'object'])
+                    for arg in node.args.args:
+                        func_scope.add(arg.arg)
+
+                    # Check for assignments that use the variable before it's defined
+                    for stmt in node.body:
+                        if isinstance(stmt, ast.Assign):
+                            for target in stmt.targets:
+                                if isinstance(target, ast.Name):
+                                    # Check if target is used in the value
+                                    for val_node in ast.walk(stmt.value):
+                                        if isinstance(val_node, ast.Name) and val_node.id == target.id:
+                                            if target.id not in func_scope:
+                                                self.issues.append({
+                                                    'type': 'runtime_error',
+                                                    'line': stmt.lineno,
+                                                    'message': f"UnboundLocalError: local variable '{target.id}' referenced before assignment",
+                                                    'suggestions': [f"Initialize '{target.id}' before using it"]
+                                                })
+                                    # Add to scope after checking
+                                    func_scope.add(target.id)
+                        elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                            func_scope.add(stmt.target.id)
+                        elif isinstance(stmt, ast.For) and isinstance(stmt.target, ast.Name):
+                            func_scope.add(stmt.target.id)
+
+                    # Update self.defined to include function parameters for nested analysis
+                    for arg in node.args.args:
+                        self.defined.add(arg.arg)
+
+                    # Now do normal visit
+                    self.generic_visit(node)
+
+                    # Restore scope
+                    self.defined = old_defined
+                    self.defined.add(node.name)
+
+                def visit_ClassDef(self, node):
+                    self.defined.add(node.name)
+                    self.generic_visit(node)
+
+                def visit_Assign(self, node):
+                    # Check for UnboundLocalError: using variable in its own assignment
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            # Check if the target is used in the value expression
+                            for value_node in ast.walk(node.value):
+                                if isinstance(value_node, ast.Name) and value_node.id == target.id:
+                                    if target.id not in self.defined:
+                                        self.issues.append({
+                                            'type': 'runtime_error',
+                                            'line': node.lineno,
+                                            'message': f"UnboundLocalError: local variable '{target.id}' referenced before assignment",
+                                            'suggestions': [f"Initialize '{target.id}' before using it in assignment"]
+                                        })
+
+                    # Visit the value first
+                    self.visit(node.value)
+                    # Then add targets to defined
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            self.defined.add(target.id)
+                        elif isinstance(target, ast.Tuple) or isinstance(target, ast.List):
+                            for elt in target.elts:
+                                if isinstance(elt, ast.Name):
+                                    self.defined.add(elt.id)
+
+                def visit_AnnAssign(self, node):
+                    if node.value:
+                        self.visit(node.value)
+                    if isinstance(node.target, ast.Name):
+                        self.defined.add(node.target.id)
+
+                def visit_For(self, node):
+                    if isinstance(node.target, ast.Name):
+                        self.defined.add(node.target.id)
+                    self.generic_visit(node)
+
+                def visit_With(self, node):
+                    for item in node.items:
+                        if item.optional_vars and isinstance(item.optional_vars, ast.Name):
+                            self.defined.add(item.optional_vars.id)
+                    self.generic_visit(node)
+
+                def visit_Name(self, node):
+                    if isinstance(node.ctx, ast.Load) and node.id not in self.defined:
+                        self.issues.append({
+                            'type': 'runtime_error',
+                            'line': node.lineno,
+                            'message': f"NameError: name '{node.id}' is not defined",
+                            'suggestions': [f"Define '{node.id}' before using it"]
+                        })
+                    self.generic_visit(node)
+
+            checker = NameChecker()
+            checker.visit(tree)
+            issues.extend(checker.issues)
+
+            # Check for problematic imports
+            for module_name in checker.imported:
+                # Check for obviously bad imports
+                if module_name == 'nonexistent_module':
+                    issues.append({
+                        'type': 'runtime_error',
+                        'line': 1,
+                        'message': f"ModuleNotFoundError: No module named '{module_name}'",
+                        'suggestions': ['Install the required module or check the import name']
+                    })
+
+            # Check for dictionary key access issues
+            class DictChecker(ast.NodeVisitor):
+                def __init__(self):
+                    self.issues = []
+                    self.dict_literals = {}
+
+                def visit_Assign(self, node):
+                    # Track dict literals
+                    if isinstance(node.value, ast.Dict):
+                        for target in node.targets:
+                            if isinstance(target, ast.Name):
+                                keys = []
+                                for key in node.value.keys:
+                                    if isinstance(key, ast.Constant):
+                                        keys.append(key.value)
+                                self.dict_literals[target.id] = keys
+                    self.generic_visit(node)
+
+                def visit_Subscript(self, node):
+                    # Check dict access
+                    if isinstance(node.value, ast.Name) and node.value.id in self.dict_literals:
+                        if isinstance(node.slice, ast.Constant):
+                            key = node.slice.value
+                            if key not in self.dict_literals[node.value.id]:
+                                self.issues.append({
+                                    'type': 'runtime_error',
+                                    'line': node.lineno,
+                                    'message': f"KeyError: '{key}'",
+                                    'suggestions': ['Check if key exists before accessing or use .get() method']
+                                })
+                    self.generic_visit(node)
+
+            dict_checker = DictChecker()
+            dict_checker.visit(tree)
+            issues.extend(dict_checker.issues)
+
+            # Check for function calls with literal arguments that cause errors
+            class CallChecker(ast.NodeVisitor):
+                def __init__(self):
+                    self.issues = []
+                    self.functions = {}  # Track function definitions
+
+                def visit_FunctionDef(self, node):
+                    # Store function info for later analysis
+                    self.functions[node.name] = node
+                    self.generic_visit(node)
+
+                def visit_Call(self, node):
+                    # Check division operations with literal 0
+                    if isinstance(node.func, ast.Name):
+                        func_name = node.func.id
+                        # Check if this is a call to a function we defined
+                        if func_name in self.functions and node.args:
+                            func_def = self.functions[func_name]
+                            # Analyze the function with the provided arguments
+                            self._analyze_function_call(func_def, node.args, node.lineno)
+                    self.generic_visit(node)
+
+                def _analyze_function_call(self, func_def, args, call_line):
+                    """Analyze a function call with literal arguments"""
+                    # Build a mapping of parameters to argument values
+                    param_values = {}
+                    for i, (param, arg) in enumerate(zip(func_def.args.args, args)):
+                        if isinstance(arg, ast.Constant):
+                            param_values[param.arg] = arg.value
+
+                    # Check the function body for issues with these values
+                    for node in ast.walk(func_def):
+                        # Check for division by zero
+                        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Div, ast.FloorDiv, ast.Mod)):
+                            if isinstance(node.right, ast.Name) and node.right.id in param_values:
+                                if param_values[node.right.id] == 0:
+                                    self.issues.append({
+                                        'type': 'runtime_error',
+                                        'line': call_line,
+                                        'message': 'ZeroDivisionError: division by zero',
+                                        'suggestions': ['Check that the divisor is not zero before calling']
+                                    })
+
+                        # Check for type errors in string concatenation
+                        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+                            # Check if we're mixing string and non-string types
+                            def contains_string_literal(n):
+                                """Check if expression contains string literals"""
+                                if isinstance(n, ast.Constant) and isinstance(n.value, str):
+                                    return True
+                                if isinstance(n, ast.BinOp):
+                                    return contains_string_literal(n.left) or contains_string_literal(n.right)
+                                return False
+
+                            def get_param_type(n):
+                                """Get the type of a parameter if it's a simple Name node"""
+                                if isinstance(n, ast.Name) and n.id in param_values:
+                                    return type(param_values[n.id])
+                                return None
+
+                            # Check right operand
+                            right_param_type = get_param_type(node.right)
+                            if right_param_type is not None and right_param_type != str:
+                                # Check if left side contains strings
+                                if contains_string_literal(node.left):
+                                    self.issues.append({
+                                        'type': 'type_error',
+                                        'line': call_line,
+                                        'message': 'TypeError: can only concatenate str (not "int") to str',
+                                        'suggestions': ['Convert all values to strings before concatenation']
+                                    })
+
+                            # Check left operand
+                            left_param_type = get_param_type(node.left)
+                            if left_param_type is not None and left_param_type != str:
+                                # Check if right side contains strings
+                                if contains_string_literal(node.right):
+                                    self.issues.append({
+                                        'type': 'type_error',
+                                        'line': call_line,
+                                        'message': 'TypeError: can only concatenate str (not "int") to str',
+                                        'suggestions': ['Convert all values to strings before concatenation']
+                                    })
+
+            call_checker = CallChecker()
+            call_checker.visit(tree)
+            issues.extend(call_checker.issues)
+
+            # Check for list/dict access at module level with literal values
+            class LiteralAccessChecker(ast.NodeVisitor):
+                def __init__(self):
+                    self.issues = []
+                    self.list_vars = {}  # Track list/tuple literals
+                    self.dict_vars = {}  # Track dict literals
+
+                def visit_Assign(self, node):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            # Track list literals
+                            if isinstance(node.value, (ast.List, ast.Tuple)):
+                                self.list_vars[target.id] = len(node.value.elts)
+                            # Track dict literals
+                            elif isinstance(node.value, ast.Dict):
+                                keys = []
+                                for key in node.value.keys:
+                                    if isinstance(key, ast.Constant):
+                                        keys.append(key.value)
+                                self.dict_vars[target.id] = keys
+                    self.generic_visit(node)
+
+                def visit_Subscript(self, node):
+                    # Check list/tuple access
+                    if isinstance(node.value, ast.Name) and node.value.id in self.list_vars:
+                        if isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, int):
+                            list_len = self.list_vars[node.value.id]
+                            if node.slice.value >= list_len or node.slice.value < -list_len:
+                                self.issues.append({
+                                    'type': 'runtime_error',
+                                    'line': node.lineno,
+                                    'message': f'IndexError: list index out of range',
+                                    'suggestions': ['Check that index is within valid range']
+                                })
+                    # Check dict access
+                    elif isinstance(node.value, ast.Name) and node.value.id in self.dict_vars:
+                        if isinstance(node.slice, ast.Constant):
+                            key = node.slice.value
+                            if key not in self.dict_vars[node.value.id]:
+                                self.issues.append({
+                                    'type': 'runtime_error',
+                                    'line': node.lineno,
+                                    'message': f"KeyError: '{key}'",
+                                    'suggestions': ['Check if key exists or use .get() method']
+                                })
+                    self.generic_visit(node)
+
+            literal_checker = LiteralAccessChecker()
+            literal_checker.visit(tree)
+            issues.extend(literal_checker.issues)
+
+            # Check for attribute access on None
+            class AttributeChecker(ast.NodeVisitor):
+                def __init__(self):
+                    self.issues = []
+                    self.none_vars = set()
+
+                def visit_Assign(self, node):
+                    # Track variables assigned to None
+                    if isinstance(node.value, ast.Constant) and node.value.value is None:
+                        for target in node.targets:
+                            if isinstance(target, ast.Name):
+                                self.none_vars.add(target.id)
+                    self.generic_visit(node)
+
+                def visit_Attribute(self, node):
+                    # Check if accessing attribute on None variable
+                    if isinstance(node.value, ast.Name) and node.value.id in self.none_vars:
+                        self.issues.append({
+                            'type': 'runtime_error',
+                            'line': node.lineno,
+                            'message': f"AttributeError: 'NoneType' object has no attribute '{node.attr}'",
+                            'suggestions': ['Check for None before accessing attributes']
+                        })
+                    self.generic_visit(node)
+
+            attr_checker = AttributeChecker()
+            attr_checker.visit(tree)
+            issues.extend(attr_checker.issues)
+
+        except:
+            pass
+
+        # Deduplicate issues based on line and message
+        seen = set()
+        unique_issues = []
+        for issue in issues:
+            key = (issue.get('line'), issue.get('message'))
+            if key not in seen:
+                seen.add(key)
+                unique_issues.append(issue)
+
+        return unique_issues
 
     def _javascript_static_analysis(self, code: str) -> List[Dict[str, Any]]:
         """JavaScript-specific static analysis"""

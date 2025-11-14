@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+models/*.pkl
+models/*.pt
+models/*.pth
+*.log
+
+# Data - Project CodeNet
+data/Project_CodeNet/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Test outputs
+test_outputs/
+reports/
+!reports/README.md
+
+# Docker - user code and outputs
+code_to_analyze/
+!code_to_analyze/README.md
+!code_to_analyze/example.py

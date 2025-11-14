@@ -60,6 +60,7 @@ class PredictionResult:
     line_number: Optional[int] = None
     error_message: Optional[str] = None
     suggestions: Optional[List[str]] = None
+    all_errors: Optional[List[Dict]] = None  # List of all detected errors
 
 
 class ErrorDetectionModel:
@@ -71,6 +72,7 @@ class ErrorDetectionModel:
         self.model_path = model_path
         self.model = None
         self.tokenizer = None
+        self.model_metadata = None  # Store CodeNet model metadata if available
         self.preprocessor = CodePreprocessor()
         self.reporter = ErrorReporter()
         self.logger = self._setup_logging()
@@ -105,17 +107,33 @@ class ErrorDetectionModel:
             # Try loading different model formats
             if model_path.suffix == '.pkl':
                 with open(model_path, 'rb') as f:
-                    self.model = pickle.load(f)
-                self.logger.info(f"Loaded pickle model from {model_path}")
+                    model_data = pickle.load(f)
+
+                # Check if this is a CodeNet-trained model with metadata
+                if isinstance(model_data, dict) and 'model' in model_data:
+                    self.model = model_data['model']
+                    self.model_metadata = {
+                        'label_encoder': model_data.get('label_encoder'),
+                        'feature_names': model_data.get('feature_names'),
+                        'model_type': model_data.get('model_type', 'unknown')
+                    }
+                    self.logger.info(f"Loaded CodeNet model ({self.model_metadata['model_type']}) from {model_path}")
+                else:
+                    # Legacy format - just the model
+                    self.model = model_data
+                    self.model_metadata = None
+                    self.logger.info(f"Loaded pickle model from {model_path}")
 
             elif TORCH_AVAILABLE and model_path.suffix in ['.pt', '.pth']:
                 self.model = torch.load(model_path, map_location='cpu')
+                self.model_metadata = None
                 self.logger.info(f"Loaded PyTorch model from {model_path}")
 
             elif model_path.is_dir() and TRANSFORMERS_AVAILABLE:
                 # Load transformer model
                 self.tokenizer = AutoTokenizer.from_pretrained(model_path)
                 self.model = AutoModel.from_pretrained(model_path)
+                self.model_metadata = None
                 self.logger.info(f"Loaded transformer model from {model_path}")
 
             else:
@@ -153,7 +171,7 @@ class ErrorDetectionModel:
         # Perform static analysis
         static_errors = self.preprocessor.static_analysis(code, language)
 
-        # If we have obvious static errors, return immediately
+        # If we have obvious static errors, return with all errors
         if static_errors:
             error_type_str = static_errors[0]['type']
             if isinstance(error_type_str, str):
@@ -172,7 +190,8 @@ class ErrorDetectionModel:
                 confidence=0.95,
                 line_number=static_errors[0].get('line'),
                 error_message=static_errors[0].get('message'),
-                suggestions=static_errors[0].get('suggestions', [])
+                suggestions=static_errors[0].get('suggestions', []),
+                all_errors=static_errors  # Include all detected errors
             )
 
         # Use ML model for deeper analysis if available
@@ -224,6 +243,49 @@ class ErrorDetectionModel:
             # Preprocess code for model input
             features = self.preprocessor.extract_features(code, language)
 
+            # Check if this is a CodeNet-trained model with metadata
+            if self.model_metadata and self.model_metadata.get('feature_names'):
+                # Use CodeNet model with proper feature ordering
+                feature_names = self.model_metadata['feature_names']
+                label_encoder = self.model_metadata.get('label_encoder')
+
+                # Create feature array in correct order
+                feature_array = [features.get(name, 0) for name in feature_names]
+
+                if NUMPY_AVAILABLE:
+                    X = np.array([feature_array])
+                else:
+                    X = [feature_array]
+
+                # Predict
+                predicted_class = self.model.predict(X)[0]
+
+                # Get confidence
+                if hasattr(self.model, 'predict_proba'):
+                    probabilities = self.model.predict_proba(X)[0]
+                    confidence = float(np.max(probabilities)) if NUMPY_AVAILABLE else float(max(probabilities))
+                else:
+                    confidence = 0.8
+
+                # Map to label using label encoder
+                if label_encoder:
+                    label = label_encoder.inverse_transform([predicted_class])[0]
+                    # Map label string to ErrorType
+                    try:
+                        error_type = ErrorType(label)
+                    except ValueError:
+                        error_type = ErrorType.UNKNOWN
+                else:
+                    error_type = ErrorType.UNKNOWN
+
+                return PredictionResult(
+                    file_path="",  # Will be filled by caller
+                    language=language,
+                    error_type=error_type,
+                    confidence=float(confidence)
+                )
+
+            # Original prediction logic for legacy models
             if TORCH_AVAILABLE and hasattr(self.model, 'predict'):
                 # PyTorch model
                 with torch.no_grad():
@@ -418,6 +480,20 @@ def main():
             print("Suggestions:")
             for suggestion in result.suggestions:
                 print(f"  - {suggestion}")
+
+        # Display all errors if available
+        if result.all_errors and len(result.all_errors) > 1:
+            print(f"\n{len(result.all_errors)} total errors detected:")
+            print("=" * 60)
+            for i, error in enumerate(result.all_errors, 1):
+                print(f"\nError {i}:")
+                print(f"  Type: {error.get('type', 'unknown')}")
+                print(f"  Line: {error.get('line', 'N/A')}")
+                print(f"  Message: {error.get('message', 'No message')}")
+                if error.get('suggestions'):
+                    print(f"  Suggestions:")
+                    for suggestion in error['suggestions']:
+                        print(f"    - {suggestion}")
     else:
         print("Usage: python error_predictor.py <file_path>")
 

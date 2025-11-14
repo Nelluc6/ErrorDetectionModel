@@ -73,19 +73,46 @@ class ErrorReporter:
         for result in results:
             report.append(f"\nFile: {result.file_path}")
             report.append(f"Language: {result.language}")
-            report.append(f"Error Type: {result.error_type.value}")
-            report.append(f"Confidence: {result.confidence:.2f}")
 
-            if result.line_number:
-                report.append(f"Line: {result.line_number}")
+            # If we have multiple errors, show them all
+            if result.all_errors and len(result.all_errors) > 1:
+                report.append(f"\nFound {len(result.all_errors)} potential issues:")
+                report.append("")
 
-            if result.error_message:
-                report.append(f"Message: {result.error_message}")
+                for i, error in enumerate(result.all_errors, 1):
+                    report.append(f"  Issue {i}:")
+                    error_type = error.get('type', 'unknown')
+                    if hasattr(error_type, 'value'):
+                        error_type = error_type.value
+                    report.append(f"    Type: {error_type}")
+                    report.append(f"    Confidence: {error.get('confidence', result.confidence):.2f}")
 
-            if result.suggestions:
-                report.append("Suggestions:")
-                for suggestion in result.suggestions:
-                    report.append(f"  • {suggestion}")
+                    if error.get('line'):
+                        report.append(f"    Line: {error['line']}")
+
+                    if error.get('message'):
+                        report.append(f"    Message: {error['message']}")
+
+                    if error.get('suggestions'):
+                        report.append(f"    Suggestions:")
+                        for suggestion in error['suggestions']:
+                            report.append(f"      • {suggestion}")
+                    report.append("")
+            else:
+                # Single error display
+                report.append(f"Error Type: {result.error_type.value}")
+                report.append(f"Confidence: {result.confidence:.2f}")
+
+                if result.line_number:
+                    report.append(f"Line: {result.line_number}")
+
+                if result.error_message:
+                    report.append(f"Message: {result.error_message}")
+
+                if result.suggestions:
+                    report.append("Suggestions:")
+                    for suggestion in result.suggestions:
+                        report.append(f"  • {suggestion}")
 
             report.append("-" * 40)
 
@@ -117,7 +144,8 @@ class ErrorReporter:
                 'confidence': result.confidence,
                 'line_number': result.line_number,
                 'error_message': result.error_message,
-                'suggestions': result.suggestions or []
+                'suggestions': result.suggestions or [],
+                'all_errors': result.all_errors if hasattr(result, 'all_errors') and result.all_errors else None
             }
             report_data['results'].append(result_dict)
 
@@ -325,6 +353,32 @@ class ErrorReporter:
             line_info = f"Line {result.line_number}" if result.line_number else "N/A"
             confidence_percent = f"{result.confidence * 100:.1f}%"
 
+            # Check if we have multiple errors
+            multiple_errors_html = ""
+            if hasattr(result, 'all_errors') and result.all_errors and len(result.all_errors) > 1:
+                multiple_errors_html = f'<h3>Found {len(result.all_errors)} potential issues:</h3>'
+                for i, error in enumerate(result.all_errors, 1):
+                    error_type_val = error.get('type', 'unknown')
+                    if hasattr(error_type_val, 'value'):
+                        error_type_val = error_type_val.value
+                    error_class_sub = error_type_val.replace('_', '-')
+                    error_conf = error.get('confidence', result.confidence) * 100
+
+                    error_sugg_html = ""
+                    if error.get('suggestions'):
+                        sugg_list = "\n".join([f"<li>{s}</li>" for s in error['suggestions']])
+                        error_sugg_html = f'<ul>{sugg_list}</ul>'
+
+                    multiple_errors_html += f'''
+                    <div style="margin: 10px 0; padding: 10px; background-color: #f8f9fa; border-radius: 4px;">
+                        <strong>Issue {i}:</strong><br>
+                        Type: <span class="error-type-badge {error_class_sub}">{error_type_val}</span><br>
+                        Confidence: {error_conf:.1f}%<br>
+                        {f"Line: {error.get('line')}<br>" if error.get('line') else ""}
+                        {f"Message: {error.get('message')}<br>" if error.get('message') else ""}
+                        {error_sugg_html}
+                    </div>'''
+
             result_html = f'''
             <div class="error-item {error_class}">
                 <div class="file-path">📄 {result.file_path}</div>
@@ -342,9 +396,7 @@ class ErrorReporter:
                         <div>{confidence_percent}</div>
                     </div>
                 </div>
-                {f'<div class="detail-item"><strong>Line:</strong> {line_info}</div>' if result.line_number else ''}
-                {f'<div class="detail-item"><strong>Message:</strong> {result.error_message}</div>' if result.error_message else ''}
-                {suggestions_html}
+                {multiple_errors_html if multiple_errors_html else f"{f'<div class=\"detail-item\"><strong>Line:</strong> {line_info}</div>' if result.line_number else ''}{f'<div class=\"detail-item\"><strong>Message:</strong> {result.error_message}</div>' if result.error_message else ''}{suggestions_html}"}
             </div>'''
 
             results_html.append(result_html)
